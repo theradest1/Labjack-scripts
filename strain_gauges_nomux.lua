@@ -3,126 +3,209 @@
 -- Strain Gauges need external amplification - do not connect it to the labjack
 -- Tie the strain gauge to ground (from the external amplification) to the labjack ground
 
-
 -- FILL OUT THESE VARIABLES ACCORDING TO THE STRAIN GAUGES BEING USED
-local ratedLoad = 2000     --
 local exciteVolt = 5      -- External voltage used to excite the SGs (usually 10-12 volts)
+local nominal = 120 -- 120 or 350 ohms
+local elasticModulus = 29000000 --elastic modulus for arms is 29m
+local gageFactor = 2.12 -- based on the strain gauges
+local logInterval = 250 --in ms
 
 print("Strain Gauge - Log voltage to file")
 
--- Check for SD card
-local hardware = MB.R(60010, 1)
-local passed = 1
-if(bit.band(hardware, 8) ~= 8) then
-  print("uSD card not detected")
-  passed = 0
+
+local function configureChannel(channel, range, resolution, settling)
+  --get base addresses
+  local rangeAddress = MB.nameToAddress("AIN0_RANGE")
+  local rasolutionAddress = MB.nameToAddress("AIN0_RESOLUTION_INDEX")
+  local settlingAddress = MB.nameToAddress("AIN0_SETTLING_US")
+  local negativeAddress = MB.nameToAddress("AIN0_NEGATIVE_CH")
+  
+  MB.W(rangeAddress + channel * 2, 3, range) -- set the range
+  MB.W(rasolutionAddress + channel * 1, 0, resolution) -- set resolution
+  MB.W(settlingAddress + channel * 2, 3, settling) --set settling time
+  MB.W(negativeAddress + channel, 0, channel + 1) --set the channel's negative address
 end
 
--- Initialize variables/functions
-local mbRead=MB.R			--local functions for faster processing
+
+-- Check for SD card
+if(bit.band(MB.R(60010, 1), 8) ~= 8) then
+  print("uSD card not detected")
+  stopProgram()
+end
+
+-- Initialize local functions (for faster processing)
+local mbRead=MB.R
 local mbWrite = MB.W
-local mbneg_chan = MB.nameToAddress("AIN_ALL_NEGATIVE_CHANNEL")
-fio0Address, fio0DataType = MB.nameToAddress("FIO0")
-fio1Address, fio1DataType = MB.nameToAddress("FIO1")
-local ain = 0
+local mbWriteName = MB.writeName
+local checkInterval=LJ.CheckInterval
+local setInterval = LJ.IntervalConfig
+
+-- Initialize variables
+local waitingInterval = 250 --how much time between checks of when loggin should start
+local safeState = 1 -- 1 if file isn't being written to
+local ledState = 1
+
+local newData = 1
+local givenVoltage = 0 -- found in loop
+
+local zeroAin = 0
+local voltageDiff = 0
 local strain = 0
-local newData = 0
-local count = 0
+local ainChannel = 0
+
 local delimiter = ","
-local ainStr = ""
-local strainStr = ""
+local strainList = {}
+local strainString = ""
 
 -- Configure AIN ports
-local ainchannels = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14}    -- AIN0 and AIN1 for ports
-local ainrange = 10     -- +/- 10V input range
-local ainresolution = 1   -- 1 is fastest setting
-local ainsettling = 0   -- default settling time
---for i=1, table.getn(ainchannels) do
-  --ain_channel_config(ainchannels[i], ainrange, ainresolution, ainsettling)
---end
+local ainChannelCorrection = {0, 0, 0, 0, 0} --values that zero each channel
+local ainChannels = {0, 2, 4, 6, 8} -- the channels that are read (only even because the odds are the negative channels)
+local givenVoltageChannel = 10
+local ainVoltageRange = 1 -- +/- 1V input range
+local ainResolution = 1 -- 1 is fastest setting?
+local ainSettlingTime = 0 -- default settling time
 
-MB.W(48005, 0, 1)                       --ensure analog is on
-MB.W(mbneg_chan,1)                      --set all channels to differential
+--loop through strain gauge ain channels
+for i=1,table.getn(ainChannels) do
+  ainChannel = ainChannels[i] --get ainChannel
+  configureChannel(ainChannel, ainVoltageRange, ainResolution, ainSettingTime)
+end
 
--- To end the entire script, click the button
-local scriptEnd = 0
-scriptEnd = mbRead(2000, 0) --FIO0
+configureChannel(givenVoltageChannel, 10, 1, 0) --input voltage muesure ain channel
 
-while scriptEnd >= 0.5 do
+
+-- functions
+local function updateDebugLED()
+  if(safeState == 1) then
+    ledState = 0 -- stay on
+  else
+    ledState = 1 - ledState -- turn on and off
+  end
+  
+  MB.writeName("FIO1", ledState) -- set lcd
+end
+
+local function setSafeState(newState)
+  safeState = newState -- record state
+  
+  updateDebugLED() -- update led
+end
+
+local function stopProgram(message)
+  message = message or "Script was stopped" -- default message
+  print(message) --print message
+  
+  MB.writeName("FIO1", 1) --set lcd state to off
+  MB.writeName("LUA_RUN", 0); -- write 0
+  MB.W(6000, 1, 0); -- stop
+end
+
+local function getLogFileName()
+  local timetable, error = MB.readNameArray("RTC_TIME_CALENDAR", 6)
+  return string.format(
+    "%04d-%02d-%02d-%02d-%02d-%02d.csv",
+    timetable[1],
+    timetable[2],
+    timetable[3],
+    timetable[4],
+    timetable[5],
+    timetable[6])
+end
+
+local function zeroChannels()
+  setInterval(0, 50) --make it loop fast
+  setSafeState(0)
+  
+  print("\nzeroing channels")
+  while zeroAin < 0.5 do
+    if checkInterval() then
+      updateDebugLED()
+      
+      for i=1,table.getn(ainChannels) do --loop through channels
+        ain = mbRead(ainChannels[i], 3) --get value
+        
+        ainChannelCorrection[i] = -ain -- set correction to -value
+      end
+      
+      zeroAin = mbRead(2000, 0) --FIO0
+    end
+  end
+  
+  setSafeState(1)
+  print("\nChannel correction:\n", table.concat(ainChannelCorrection, delimiter))
+end
+
+
+while true do --loop forever
+  setSafeState(1) --set default state
+  
+  -- Set waiting interval
+  setInterval(0, waitingInterval)
+  
+  print("\nWaiting for button to be pressed")
+  while newData >= 0.5 do
+    if checkInterval() then
+
+      --check if user wants to zero channels
+      zeroAin = mbRead(2000, 0) --FIO0
+      if zeroAin < 0.5 then
+        zeroChannels()
+      end
+      
+      newData = mbRead(2002, 0) --FIO2
+    end
+  end
+  
   -- Create and open file for write access
-  local cntStr = tostring(count)
-  local Filename = cntStr .. ".csv"
+  local Filename = getLogFileName()
+  setSafeState(0) -- set mode to unsafe
   local file = io.open(Filename, "w")
 
   -- Make sure that the file was opened properly.
   if file then
-    print("Opened File on uSD Card")
+    print("\nCreated and opened debug file with name " .. Filename .. "\n")
   else
     -- If the file was not opened properly we probably have a bad SD card.
-    print("!! Failed to open file on uSD Card !! \n Stoping script")
-    MB.W(6000, 1, 0);
+    stopProgram("!! Failed to open file on uSD Card !! \n Stoping script\n")
   end
   
-  -- Set interval to 1000 for 1000ms
-  LJ.IntervalConfig(0, 1000)
-  local checkInterval=LJ.CheckInterval
-  
-   -- Read FIO2 (2002) state
-  newData = mbRead(2002, 0)
-  
-   repeat
-    if newData <= 0.5 then
-      if checkInterval(0) then      --if sleep is 1sec
-        print("Waiting for button to be pressed")
-
-        newData = mbRead(2001, 0) --FIO1
-        scriptEnd = mbRead(2000, 0) --FIO0
-
-        if scriptEnd < 0.5 then
-          print("Finished Script")
-          MB.W(6000, 1, 0);
-        end
-      end
-    end
-  until newData < 0.5
+  -- Set logging interval
+  setInterval(0, logInterval)
   
   -- NewData button has been pressed - start recording data
+  print("Loging data:")
   while newData < 0.5 do
-    if checkInterval(0) then     	    --interval completed
-      ain_list = ""
-      for i=1, table.getn(ainchannels) do
-        if ainchannels[i]%2 == 0 then
-          ain = mbRead(ainchannels[i],3)
-          strain = 4*ain/(2.1*(exciteVolt - 2*ain))
-          ain_list = ain_list.append(string.format("%.6f", strain))
+    if checkInterval() then
+      updateDebugLED()
+      
+      strainList = {} -- clear list
+      
+      for i=1,table.getn(ainChannels) do
+        if ainChannels[i]%2 == 0 then
+          givenVoltage = mbRead(givenVoltageChannel, 3) -- get Vs
+          
+          voltageDiff = mbRead(ainChannels[i], 3) --get voltage difference
+          
+          voltageDiff = voltageDiff + ainChannelCorrection[i] --correct value
+          
+          strain = voltageDiff --(ain - nominal)/nominal/gageFactor
+          --strain = 4*ain/(2.1*(exciteVolt - 2*ain))
+          
+          table.insert(strainList, tostring(strain))
         end
       end
+      strainString = table.concat(strainList, delimiter) -- convert to string
       
-      -- Write data to file
-      file:write(ain_list, "\n")
-
-      -- Check status of newData button
-      newData = mbRead(2001, 0)
-
-    end
-    if newData >= 0.5 then
-      break
+      file:write(strainString, "\n") -- Write data to file
+      print(strainString) --print to console
+      
+      newData = mbRead(2002, 0)  -- Check status of newData button
     end
   end
   
   -- Close current working file
   file:close()
-  print("Done with log. \n")
-  count = count + 1
-
-  -- Check scriptEnd button status
-  scriptEnd = mbRead(2000, 0) --FIO0
-
-  -- If the scriptEnd button has been pressed
-  if scriptEnd < 0.5 then
-    print("Finished Script")
-    MB.W(6000, 1, 0);
-  end
+  safeState = 1
 end
-  
-  
+
+
