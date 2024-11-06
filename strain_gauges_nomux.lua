@@ -7,7 +7,7 @@
 local exciteVolt = 5      -- External voltage used to excite the SGs (usually 10-12 volts)
 local nominal = 120 -- 120 or 350 ohms
 local elasticModulus = 29000000 --elastic modulus for arms is 29m
-local gageFactor = 2.12 -- based on the strain gauges
+local gaugeFactor = 2.12 -- based on the strain gauges
 local logInterval = 250 --in ms
 
 print("Strain Gauge - Log voltage to file")
@@ -49,6 +49,9 @@ local newData = 1
 local givenVoltage = 0 -- found in loop
 
 local zeroAin = 0
+
+local sgResistance = 0
+local sgResistanceDiff = 0
 local voltageDiff = 0
 local strain = 0
 local ainChannel = 0
@@ -168,12 +171,16 @@ while true do --loop forever
     -- If the file was not opened properly we probably have a bad SD card.
     stopProgram("!! Failed to open file on uSD Card !! \n Stoping script\n")
   end
+  print("Loging data:\n")
+  
+  csvHeader = "sg1, sg2, sg3, sg4, sg5"
+  file:write(csvHeader, "\n") -- Write data to file
+  print(csvHeader)
   
   -- Set logging interval
   setInterval(0, logInterval)
   
   -- NewData button has been pressed - start recording data
-  print("Loging data:")
   while newData < 0.5 do
     if checkInterval() then
       updateDebugLED()
@@ -181,18 +188,20 @@ while true do --loop forever
       strainList = {} -- clear list
       
       for i=1,table.getn(ainChannels) do
-        if ainChannels[i]%2 == 0 then
-          givenVoltage = mbRead(givenVoltageChannel, 3) -- get Vs
-          
-          voltageDiff = mbRead(ainChannels[i], 3) --get voltage difference
-          
-          voltageDiff = voltageDiff + ainChannelCorrection[i] --correct value
-          
-          strain = voltageDiff --(ain - nominal)/nominal/gageFactor
-          --strain = 4*ain/(2.1*(exciteVolt - 2*ain))
-          
-          table.insert(strainList, tostring(strain))
+        -- get variable values
+        givenVoltage = mbRead(givenVoltageChannel, 3) -- get Vs
+        voltageDiff = mbRead(ainChannels[i], 3) + ainChannelCorrection[i] --get voltage difference, and correct
+        
+        if(math.abs(voltageDiff) > ainVoltageRange) then
+          stopProgram("Voltage range is too small")
         end
+        
+        -- math :(
+        sgResistance = -nominal/(voltageDiff/givenVoltage - .5) - nominal
+        sgResistanceDiff = sgResistance - nominal
+        strain = sgResistanceDiff/sgResistance*elasticModulus/gaugeFactor
+        
+        table.insert(strainList, tostring(strain))
       end
       strainString = table.concat(strainList, delimiter) -- convert to string
       
