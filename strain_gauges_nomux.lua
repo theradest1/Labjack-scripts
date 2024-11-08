@@ -7,7 +7,7 @@
 local exciteVolt = 5      -- External voltage used to excite the SGs (usually 10-12 volts)
 local nominal = 120 -- 120 or 350 ohms
 local elasticModulus = 29000000 --elastic modulus for arms is 29m
-local gaugeFactor = 26--2.12 -- based on the strain gauges
+local gaugeFactor = 2.12 --2.12 -- based on the strain gauges
 local logInterval = 50 --in ms
 
 print("Strain Gauge - Log voltage to file")
@@ -50,12 +50,12 @@ local stressString = ""
 local ainChannelCorrection = {0}--, 0, 0, 0, 0} --values that zero each channel
 local ainChannels = {0}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
 local givenVoltageChannel = 2
-local ainVoltageRange = 10 -- +/- 1V input range
-local ainResolution = 12 -- 1 is fastest, 12 is most detail
+local ainVoltageRange = 0.01 -- +/- 1V input range
+local ainResolution = 10 -- 1 is fastest, 12 is most detail (but slowest)
 local ainSettlingTime = 0 -- default settling time
 
 -- functions
-local function configureChannel(channel, range, resolution, settling)
+local function configureChannel(channel, range, resolution, settling, differential)
   --get base addresses
   rangeaddress = mbNameToAddress("AIN0_RANGE")
   resaddress = mbNameToAddress("AIN0_RESOLUTION_INDEX")
@@ -65,8 +65,11 @@ local function configureChannel(channel, range, resolution, settling)
   -- set config
   mbWrite(rangeaddress + channel * 2, 3, range)
   mbWrite(resaddress + channel * 1, 0, resolution)
-  mbWrite(setaddress + channel * 2, 3, settling)
-  mbWrite(negchaddress + channel, 0, channel + 1)
+  --mbWrite(setaddress + channel * 2, 3, settling)
+  
+  if(differential) then
+    mbWrite(negchaddress + channel, 0, channel + 1)
+  end
 end
 
 local function updateDebugLED()
@@ -115,12 +118,18 @@ local function zeroChannels()
     if LJ.CheckInterval() then
       updateDebugLED()
       
+      --simulating reading the data
+      givenVoltage = mbRead(givenVoltageChannel * 2, 3)
+      for i=1, table.getn(ainChannels) do
+        ain = mbRead(ainChannels[i] * 2, 3) --get value
+      end
+      
       zeroAin = mbRead(2000, 0) --FIO0
     end
   end
   
   for i=1, table.getn(ainChannels) do --loop through channels
-    ain = mbReadName("AIN" .. ainChannels[i], 3) --get value
+    ain = mbRead(ainChannels[i] * 2, 3) --get value
     
     ainChannelCorrection[i] = -ain -- set correction to -value
   end
@@ -131,9 +140,10 @@ end
 
 --loop through strain gauge ain channels
 for i=1,table.getn(ainChannels) do
-  configureChannel(ainChannels[i], ainVoltageRange, ainResolution, ainSettingTime)
+  configureChannel(ainChannels[i], ainVoltageRange, ainResolution, ainSettlingTime, true)
+  configureChannel(ainChannels[i] + 1, 10, ainResolution, ainSettlingTime, false) --negative channel
 end
---configureChannel(givenVoltageChannel, 10, 1, 0) --input voltage muesure ain channel
+configureChannel(givenVoltageChannel, 10, ainResolution, ainSettlingTime, true) --input voltage muesure ain channel
 
 while true do --loop forever
   setSafeState(1) --set default state
@@ -142,16 +152,13 @@ while true do --loop forever
   setInterval(0, waitingInterval)
   
   print("\nWaiting for button to be pressed")
-  while newData >= 0.5 do
+  while mbRead(2002, 0) >= 0.5 do
     if checkInterval() then
 
       --check if user wants to zero channels
-      zeroAin = mbRead(2000, 0) --FIO0
-      if zeroAin < 0.5 then
+      if mbRead(2000, 0) < 0.5 then
         zeroChannels()
       end
-      
-      newData = mbRead(2002, 0) --FIO2
     end
   end
   
@@ -168,24 +175,25 @@ while true do --loop forever
     stopProgram("!! Failed to open file on uSD Card !! \n Stoping script\n")
   end
   print("Logging data:")
-  
-  file:write("sg1, sg2, sg3, sg4, sg5", "\n") -- Write header to file
+  header = "time (seconds), stress (psi)"
+  print(header)
+  file:write(header, "\n") -- Write header to file
   
   -- Set logging interval
   setInterval(0, logInterval)
   
   -- NewData button has been pressed - start recording data
-  while newData < 0.5 do
+  while mbRead(2002, 0) < 0.5 do
     if checkInterval() then
       updateDebugLED()
-      stressString = ""
-      diffString = ""
+      stressString = ""--tostring(mbReadName("SYSTEM_COUNTER_10KHZ"))
+      seconds, error = MB.readNameArray("RTC_TIME_S", 2, 1)
+      print(seconds)
       
+      givenVoltage = mbRead(givenVoltageChannel * 2, 3) -- get Vs
       for i=1,table.getn(ainChannels) do
         -- get variable values
-        givenVoltage = mbReadName("AIN" .. givenVoltageChannel, 3) -- get Vs
-        voltageDiff = mbReadName("AIN" .. ainChannels[i], 3) -- get voltage diff
-        
+        voltageDiff = mbRead(0, 3) -- get voltage diff
         voltageDiff = voltageDiff + ainChannelCorrection[i] -- correct voltage input
         
         -- math :(
@@ -193,20 +201,29 @@ while true do --loop forever
         sgResistanceDiff = sgResistance - nominal
         stress = sgResistanceDiff/sgResistance*elasticModulus/gaugeFactor
         
-        print(i .. ": " .. voltageDiff .. "DV, " .. stress .. " psi, " .. sgResistanceDiff .. " ohms")
+        --print(i .. ": " .. voltageDiff .. "DV, " .. stress .. " psi, " .. sgResistanceDiff .. " ohms")
+        --print(voltageDiff)
         stressString = stressString .. ", " .. stress
       end
-      
       file:write(stressString, "\n") -- Write data to file
       --print(stressString) --print to console
       
-      
-      newData = mbRead(2002, 0)  -- Check status of newData button
+      if mbRead(2000, 0) < .5 then
+        for i=1, table.getn(ainChannels) do --loop through channels
+          ain = mbRead(ainChannels[i] * 2, 3) --get value
+          
+          ainChannelCorrection[i] = -ain -- set correction to -value
+          
+          print("zerod")
+        end
+      end
     end
   end
   
   -- Close current working file
-  file:close()
+  file:flush() --make sure its saved
+  file:close() --close the file
+  print("Closed file")
   setSafeState(1)
 end
 
