@@ -98,7 +98,8 @@ while true do --loop forever
   mbWriteName("FIO1", 0) -- set led
   
   print("\nWaiting for button to be pressed")
-  while mbRead(2002, 0) >= 0.5 do
+  while MB.readName("FIO1") >= 0.5 do
+    -- wait for FIO1 to be high (the button)
   end
   
   --get logfile name
