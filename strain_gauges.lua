@@ -3,12 +3,19 @@
 -- Strain Gauges need external amplification - do not connect it to the labjack
 -- Tie the strain gauge to ground (from the external amplification) to the labjack ground
 
+-- put an led on FIO1
+-- zeroing switch on FIO0 (other side to ground)
+-- logging switch on FIO2 (other side to ground)
+
 -- FILL OUT THESE VARIABLES ACCORDING TO THE STRAIN GAUGES BEING USED
 local exciteVolt = 5      -- External voltage used to excite the SGs (usually 10-12 volts)
-local nominal = 120 -- 120 or 350 ohms
 local elasticModulus = 29000000 -- elastic modulus for arms is 29m
 local gaugeFactor = 2.12 --2.12 -- based on the strain gauges
+-- set nominal resistances where below where pins are set
 LJ.IntervalConfig(0, .01) --logging interval in ms (.01 is the fastest it can go without just removing the interval timer)
+
+--syncing sin wave
+local waveHz = 2
 
 print("Strain Gauge - Log voltage to file")
 
@@ -29,7 +36,7 @@ local mbReadName = MB.readName
 local mbWriteName = MB.writeName
 local mbReadArray = MB.RA
 local mbWriteArray = MB.WA
-local checkInterval=LJ.CheckInterval
+local checkInterval = LJ.CheckInterval
 
 -- Initialize variables
 local ledState = 1
@@ -39,6 +46,7 @@ local sgResistance = 0
 local sgResistanceDiff = 0
 local voltageDiff = 0
 local stress = 0
+local nominalResistance = 0
 
 local ainChannel = 0
 
@@ -49,31 +57,33 @@ local filename = ""
 local timetable = 0
 
 local delimiter = ","
-local stressString = ""
+local writeString = ""
+
+local startTimeTable = ""
 
 -- AIN port config
 local ainChannelCorrection = {0, 0, 0, 0, 0}--, 0, 0, 0, 0} --values that zero each channel
-local ainChannels = {0, 0, 0, 0, 0}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
-local givenVoltageChannel = 2
+local nominalResistances = {120, 120, 120, 120, 120}  -- 120 or 350 ohms
+local ainChannels = {0, 2, 4, 6, 8}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
+local givenVoltageChannel = 10
 local ainVoltageRange = 0.01 -- +/- 1V input range
-local ainResolution = 6 -- 1 is fastest, 12 is most detail (but slowest)
+local ainResolution = 8 -- 1 is fastest, 12 is most detail (but slowest)
 local ainSettlingTime = 0 -- default settling time
 
 -- functions
 local function configureChannel(channel, range, resolution, settling, differential)
-  --get base addresses
-  rangeaddress = mbNameToAddress("AIN0_RANGE")
-  resaddress = mbNameToAddress("AIN0_RESOLUTION_INDEX")
-  setaddress = mbNameToAddress("AIN0_SETTLING_US")
-  negchaddress = mbNameToAddress("AIN0_NEGATIVE_CH")
+  local channel_int = string.format("%d", channel)
   
   -- set config
-  mbWrite(rangeaddress + channel * 2, 3, range)
-  mbWrite(resaddress + channel * 1, 0, resolution)
-  --mbWrite(setaddress + channel * 2, 3, settling)
+  mbWriteName("AIN".. channel_int .."_RANGE", range)
+  mbWriteName("AIN".. channel_int .."_RESOLUTION_INDEX", resolution)
+  mbWriteName("AIN".. channel_int .."_EF_INDEX", 0) -- turn off extended features
+  mbWriteName("AIN".. channel_int .."_SETTLING_US", settling)
   
   if(differential) then
-    mbWrite(negchaddress + channel, 0, channel + 1)
+    mbWriteName("AIN".. channel_int .."_NEGATIVE_CH", channel + 1) --set negative channel
+  else
+    mbWriteName("AIN".. channel_int .."_NEGATIVE_CH", 199) --turn off negative channel
   end
 end
 
@@ -86,20 +96,24 @@ local function stopProgram(message)
   mbWrite(6000, 1, 0); -- stop
 end
 
+local function getTime(startTimeTable, currentTimeTable)
+  return currentTimeTable
+end
+
 --loop through strain gauge ain channels
 for i=1,table.getn(ainChannels) do
   configureChannel(ainChannels[i], ainVoltageRange, ainResolution, ainSettlingTime, true)
   configureChannel(ainChannels[i] + 1, 10, ainResolution, ainSettlingTime, false) --negative channel
 end
-configureChannel(givenVoltageChannel, 10, ainResolution, ainSettlingTime, true) --input voltage muesure ain channel
+configureChannel(givenVoltageChannel, 10, ainResolution, ainSettlingTime, false) --input voltage muesure ain channel
 
 
 while true do --loop forever
   mbWriteName("FIO1", 0) -- set led
   
   print("\nWaiting for button to be pressed")
-  while MB.readName("FIO1") >= 0.5 do
-    -- wait for FIO1 to be high (the button)
+  while MB.readName("FIO2") >= 0.5 do
+    -- wait for FIO1 to be high
   end
   
   --get logfile name
@@ -118,21 +132,24 @@ while true do --loop forever
 
   -- Make sure that the file was opened properly.
   if file then
-    print("\nCreated and opened debug file with name " .. filename .. "\n")
+    print("\nCreated and opened log file with name " .. filename .. "\n")
   else
     -- If the file was not opened properly we probably have a bad SD card.
     stopProgram("!! Failed to open file on uSD Card !! \n Stoping script\n")
   end
   
   --create header
-  header = "time"
+  header = "sinWave, time, inputVoltage"
   for i=1,table.getn(ainChannels) do
-    header = string.format("%s, strain%d", header, i)
+    header = string.format("%s, voltage%d", header, i)
   end
   
   --write header
   file:write(header, "\n")
   print(header)
+  
+  startTimeTable = mbReadArray(61500, 0, 2)
+  startTimeTable[3] = mbRead(61502, 1)
   
   -- NewData button has been pressed - start recording data
   while mbRead(2002, 0) < 0.5 do
@@ -140,25 +157,40 @@ while true do --loop forever
       ledState = 1 - ledState -- turn on and off
       mbWriteName("FIO1", ledState) -- set led
       
-      --get time
-      secondsTable = mbReadArray(61500, 0, 2)
-      stressString = string.format("%d%d.%04d", secondsTable[1], secondsTable[2], mbRead(61502, 1))
+      --sin wave
+      writeString = "0"
       
-      givenVoltage = mbRead(givenVoltageChannel * 2, 3) -- get Vs
+      --get time
+      currentTimeTable = mbReadArray(61500, 0, 2)
+      currentTimeTable[3] = mbRead(61502, 1)
+      --print(currentTimeTable[1], currentTimeTable[2], currentTimeTable[3])
+      timeTable = getTime(startTimeTable, currentTimeTable)
+      writeString = writeString .. ", " .. string.format("%d%d.%04d", timeTable[1], timeTable[2], timeTable[3])
+      
+      --input voltage
+      givenVoltage = mbRead(givenVoltageChannel * 2, 3)
+      writeString = writeString .. ", " .. givenVoltage
+      
+      --go through channels
       for i=1,table.getn(ainChannels) do
+        
         -- get variable values
         voltageDiff = mbRead(ainChannels[i] * 2, 3) -- get voltage diff
         voltageDiff = voltageDiff + ainChannelCorrection[i] -- correct voltage input
         
+        --get nominal resistance
+        nominalResistance = nominalResistances[i]
+        
         -- math :(
-        sgResistance = -nominal/(voltageDiff/givenVoltage - 0.5) - nominal
-        sgResistanceDiff = sgResistance - nominal
+        sgResistance = -nominalResistance/(voltageDiff/givenVoltage - 0.5) - nominalResistance
+        sgResistanceDiff = sgResistance - nominalResistance
         stress = sgResistanceDiff/sgResistance*elasticModulus/gaugeFactor
         
-        stressString = stressString .. ", " .. stress
+        writeString = writeString .. ", " .. stress
       end
-      file:write(stressString, "\n") -- Write data to file
-      print(stressString) --print to console
+      
+      file:write(writeString, "\n") -- Write data to file
+      print(writeString) --print to console
       
       --zeroing
       if mbRead(2000, 0) < .5 then
@@ -167,7 +199,7 @@ while true do --loop forever
           
           ainChannelCorrection[i] = -ain -- set correction to -value
           
-          print("zerod")
+          --print("zerod")
         end
       end
     end

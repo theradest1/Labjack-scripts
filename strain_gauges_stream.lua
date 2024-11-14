@@ -8,7 +8,7 @@ local exciteVolt = 5      -- External voltage used to excite the SGs (usually 10
 local nominal = 120 -- 120 or 350 ohms
 local elasticModulus = 29000000 -- elastic modulus for arms is 29m
 local gaugeFactor = 2.12 --2.12 -- based on the strain gauges
-LJ.IntervalConfig(0, .01) --logging interval in ms (.01 is the fastest it can go without just removing the interval timer)
+LJ.IntervalConfig(0, 5) --logging interval in ms (.01 is the fastest it can go without just removing the interval timer)
 
 print("Strain Gauge - Log voltage to file")
 
@@ -50,10 +50,15 @@ local timetable = 0
 
 local delimiter = ","
 local stressString = ""
+local data = {}
+
+local streamread = 0
+local maxreads = 1000
+local interval = 100
 
 -- AIN port config
-local ainChannelCorrection = {0, 0, 0, 0, 0}--, 0, 0, 0, 0} --values that zero each channel
-local ainChannels = {0, 0, 0, 0, 0}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
+local ainChannelCorrection = {0}--, 0, 0, 0, 0} --values that zero each channel
+local ainChannels = {0}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
 local givenVoltageChannel = 2
 local ainVoltageRange = 0.01 -- +/- 1V input range
 local ainResolution = 6 -- 1 is fastest, 12 is most detail (but slowest)
@@ -93,15 +98,30 @@ for i=1,table.getn(ainChannels) do
 end
 configureChannel(givenVoltageChannel, 10, ainResolution, ainSettlingTime, true) --input voltage muesure ain channel
 
+-- configure stream
+MB.writeName("STREAM_ENABLE", 0) -- Make sure streaming is not enabled
 
+MB.writeName("POWER_AIN", 1) -- Make sure analog is on
+MB.writeName("AIN_ALL_RANGE", 10) -- Use +-10V for the AIN range
+MB.writeName("STREAM_SCANRATE_HZ", 4000) -- 4kHz polling rate
+MB.writeName("STREAM_NUM_ADDRESSES", 1)
+MB.writeName("STREAM_SETTLING_US", 1) -- Enforce a 1uS settling time
+MB.writeName("STREAM_RESOLUTION_INDEX", 0) -- Use the default stream resolution
+MB.writeName("STREAM_BUFFER_SIZE_BYTES", 2^11) -- Use a 1024 byte buffer size (must be a power of 2)
+MB.writeName("STREAM_AUTO_TARGET", 16) -- Use command-response mode (0b10000=16)
+MB.writeName("STREAM_NUM_SCANS", 0) -- Run continuously (can be limited)
+MB.writeName("STREAM_SCANLIST_ADDRESS0", 0) -- Scan AIN0
+
+-- loop
 while true do --loop forever
   mbWriteName("FIO1", 0) -- set led
-  
+
   print("\nWaiting for button to be pressed")
-  while MB.readName("FIO1") >= 0.5 do
+  while MB.readName("FIO2") >= 0.5 do
     -- wait for FIO1 to be high (the button)
   end
   
+  --file stuff
   --get logfile name
   timetable = MB.readNameArray("RTC_TIME_CALENDAR", 6)
   filename = string.format(
@@ -133,21 +153,44 @@ while true do --loop forever
   --write header
   file:write(header, "\n")
   print(header)
+
+  MB.writeName("STREAM_ENABLE", 1) -- Start the stream
   
-  -- NewData button has been pressed - start recording data
+  -- start recording data
+  local numinbuffer = 1 --num channels
   while mbRead(2002, 0) < 0.5 do
     if checkInterval() then
       ledState = 1 - ledState -- turn on and off
       mbWriteName("FIO1", ledState) -- set led
+
+      -- 4 (header) + whatever is left (or num channels at start)
+      local numtoread = 4 + numinbuffer
+
+      --read the data
+      data = MB.readNameArray("STREAM_DATA_CR", numtoread, 0)
+      
+      -- check how much data is left
+      numinbuffer = data[2]
+      if numinbuffer > 100 then
+        print("TO MANY DATA!!!")
+        numinbuffer = 100
+      end
       
       --get time
       secondsTable = mbReadArray(61500, 0, 2)
       stressString = string.format("%d%d.%04d", secondsTable[1], secondsTable[2], mbRead(61502, 1))
       
-      givenVoltage = mbRead(givenVoltageChannel * 2, 3) -- get Vs
-      for i=1,table.getn(ainChannels) do
+      givenVoltage = 5--mbRead(givenVoltageChannel * 2, 3) -- get Vs
+      for i=5,numtoread do
         -- get variable values
-        voltageDiff = mbRead(ainChannels[i] * 2, 3) -- get voltage diff
+        --voltageDiff = mbRead(ainChannels[i] * 2, 3) -- get voltage diff
+        
+        --bad data
+        if data[i] == 0xFFFF then
+          print("Bad Val", data[3],data[4])
+        end
+        
+        voltageDiff = data[i]
         voltageDiff = voltageDiff + ainChannelCorrection[i] -- correct voltage input
         
         -- math :(
@@ -161,20 +204,20 @@ while true do --loop forever
       print(stressString) --print to console
       
       --zeroing
-      if mbRead(2000, 0) < .5 then
-        for i=1, table.getn(ainChannels) do --loop through channels
-          ain = mbRead(ainChannels[i] * 2, 3) --get value
-          
-          ainChannelCorrection[i] = -ain -- set correction to -value
-          
-          print("zerod")
-        end
-      end
+      --if mbRead(2000, 0) < .5 then
+      --  for i=1, table.getn(ainChannels) do --loop through channels
+      --    ain = mbRead(ainChannels[i] * 2, 3) --get value
+      --    
+      --    ainChannelCorrection[i] = -ain -- set correction to -value
+      --    
+      --    print("zerod")
+      --  end
+      --end
     end
   end
   
-  -- Close current working file
-  file:flush() --make sure its saved
+  MB.writeName("STREAM_ENABLE", 0) -- stop the stream
+  file:flush() --make sure file is saved
   file:close() --close the file
   print("Closed file")
   mbWriteName("FIO1", 0) -- set led
