@@ -30,11 +30,8 @@ end
 -- Initialize local functions (for faster processing)
 local mbRead=MB.R
 local mbWrite = MB.W
-local mbNameToAddress = MB.nameToAddress
-local mbReadName = MB.readName
 local mbWriteName = MB.writeName
 local mbReadArray = MB.RA
-local mbWriteArray = MB.WA
 local checkInterval = LJ.CheckInterval
 
 -- Initialize variables
@@ -47,16 +44,11 @@ local voltageDiff = 0
 local stress = 0
 local nominalResistance = 0
 
-local ainChannel = 0
-
-local logStartTime = 0
-local secondsTable = 0
-
 local filename = ""
 local timetable = 0
 
-local delimiter = ","
 local writeString = ""
+local header = ""
 
 local startTime = 0
 local currentTime = 0
@@ -66,6 +58,7 @@ local sinWave = 0
 local ainChannelCorrection = {0, 0, 0, 0, 0}--, 0, 0, 0, 0} --values that zero each channel
 local nominalResistances = {120, 350, 120, 120, 120}  -- 120 or 350 ohms
 local ainChannels = {0, 2, 4, 6, 8}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
+local ainChannelNum = table.getn(ainChannels)
 local givenVoltageChannel = 10
 local ainVoltageRange = 0.01 -- +/- 1V input range
 local ainResolution = 8 -- 1 is fastest, 12 is most detail (but slowest)
@@ -97,12 +90,8 @@ local function stopProgram(message)
   mbWrite(6000, 1, 0); -- stop
 end
 
-local function getTime(startTimeTable, currentTimeTable)
-  return currentTimeTable
-end
-
 --loop through strain gauge ain channels
-for i=1,table.getn(ainChannels) do
+for i=1,ainChannelNum do
   configureChannel(ainChannels[i], ainVoltageRange, ainResolution, ainSettlingTime, true)
   configureChannel(ainChannels[i] + 1, 10, ainResolution, ainSettlingTime, false) --negative channel
 end
@@ -141,7 +130,7 @@ while true do --loop forever
   
   --create header
   header = "sinWave, time, inputVoltage"
-  for i=1,table.getn(ainChannels) do
+  for i=1,ainChannelNum do
     header = string.format("%s, voltage%d", header, i)
   end
   
@@ -176,7 +165,7 @@ while true do --loop forever
       mbWrite(1000, 3, 2.5 * sinWave + 2.5) -- 0V to 5V
       
       --go through channels
-      for i=1,table.getn(ainChannels) do
+      for i=1,ainChannelNum do
         
         -- get variable values
         voltageDiff = mbRead(ainChannels[i] * 2, 3) -- get voltage diff
@@ -197,10 +186,10 @@ while true do --loop forever
       
       --zeroing
       if mbRead(2000, 0) < .5 then
-        for i=1, table.getn(ainChannels) do --loop through channels
-          ain = mbRead(ainChannels[i] * 2, 3) --get value
+        for i=1, ainChannelNum do --loop through channels
+          voltageDiff = mbRead(ainChannels[i] * 2, 3) --get value
           
-          ainChannelCorrection[i] = -ain -- set correction to -value
+          ainChannelCorrection[i] = -voltageDiff -- set correction to -value
         end
       end
     end
