@@ -15,7 +15,7 @@ local gaugeFactor = 2.12 --2.12 -- based on the strain gauges
 LJ.IntervalConfig(0, .01) --logging interval in ms (.01 is the fastest it can go without just removing the interval timer)
 
 --syncing sin wave
-local waveHz = 2
+local sinWaveHz = 10
 
 print("Strain Gauge - Log voltage to file")
 
@@ -59,11 +59,12 @@ local timetable = 0
 local delimiter = ","
 local writeString = ""
 
-local startTimeTable = ""
+local startTime = 0
+local currentTime = 0
 
 -- AIN port config
 local ainChannelCorrection = {0, 0, 0, 0, 0}--, 0, 0, 0, 0} --values that zero each channel
-local nominalResistances = {120, 120, 120, 120, 120}  -- 120 or 350 ohms
+local nominalResistances = {120, 350, 120, 120, 120}  -- 120 or 350 ohms
 local ainChannels = {0, 2, 4, 6, 8}--, 4, 6, 8, 10} -- the channels that are read (only even because the odds are the negative channels)
 local givenVoltageChannel = 10
 local ainVoltageRange = 0.01 -- +/- 1V input range
@@ -146,10 +147,9 @@ while true do --loop forever
   
   --write header
   file:write(header, "\n")
-  print(header)
+  --print(header)
   
-  startTimeTable = mbReadArray(61500, 0, 2)
-  startTimeTable[3] = mbRead(61502, 1)
+  startTime = mbReadArray(61500, 0, 2)[2] + mbRead(61502, 1)/10000
   
   -- NewData button has been pressed - start recording data
   while mbRead(2002, 0) < 0.5 do
@@ -157,19 +157,15 @@ while true do --loop forever
       ledState = 1 - ledState -- turn on and off
       mbWriteName("FIO1", ledState) -- set led
       
-      --sin wave
-      writeString = "0"
       
       --get time
-      currentTimeTable = mbReadArray(61500, 0, 2)
-      currentTimeTable[3] = mbRead(61502, 1)
-      --print(currentTimeTable[1], currentTimeTable[2], currentTimeTable[3])
-      timeTable = getTime(startTimeTable, currentTimeTable)
-      writeString = writeString .. ", " .. string.format("%d%d.%04d", timeTable[1], timeTable[2], timeTable[3])
+      currentTime = mbReadArray(61500, 0, 2)[2] + mbRead(61502, 1)/10000 - startTime
       
       --input voltage
       givenVoltage = mbRead(givenVoltageChannel * 2, 3)
-      writeString = writeString .. ", " .. givenVoltage
+      
+      --sin wave
+      writeString = math.sin(2 * 3.1415 * currentTime * sinWaveHz) .. ", " .. currentTime .. ", " .. givenVoltage
       
       --go through channels
       for i=1,table.getn(ainChannels) do
@@ -190,7 +186,7 @@ while true do --loop forever
       end
       
       file:write(writeString, "\n") -- Write data to file
-      print(writeString) --print to console
+      --print(writeString) --print to console
       
       --zeroing
       if mbRead(2000, 0) < .5 then
@@ -198,8 +194,6 @@ while true do --loop forever
           ain = mbRead(ainChannels[i] * 2, 3) --get value
           
           ainChannelCorrection[i] = -ain -- set correction to -value
-          
-          --print("zerod")
         end
       end
     end
@@ -208,6 +202,7 @@ while true do --loop forever
   -- Close current working file
   file:flush() --make sure its saved
   file:close() --close the file
+  
   print("Closed file")
   mbWriteName("FIO1", 0) -- set led
 end
