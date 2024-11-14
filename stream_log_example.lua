@@ -10,7 +10,7 @@
 --]]
 
 -- Function that applies nominal cal constants (+-10V range)
-function applycal(b)
+function binaryToVoltageBig(b)
   local v = 0
   local pslope = 0.000315805780
   local nslope = -0.000315805800
@@ -24,26 +24,26 @@ function applycal(b)
   return v
 end
 
-print("Stream and log AIN0 at 4kS/s to file, nominal cal constants")
+-- Function that applies nominal cal constants (+-.01V range)
+function binaryToVoltageSmall(b)
+  local v = 0
+  local pslope = 0.00000031580578
+  local nslope = -0.00000031580580
+  local bincenter = 33523.0
+  
+  if b < bincenter then
+    v = (bincenter - b) * nslope
+  else
+    v = (b - bincenter) * pslope
+  end
+  
+  return v
+end
+
+print("Stream and log AIN0 at 1kS/s to file, nominal cal constants")
 -- Disable truncation warnings (truncation is not a problem in this script)
 MB.writeName("LUA_NO_WARN_TRUNCATION", 1)
 strdate = ""
--- Check what hardware is installed
-local hardware = MB.readName("HARDWARE_INSTALLED")
-local passed = 1
-if(bit.band(hardware, 8) ~= 8) then
-  print("uSD card not detected")
-  passed = 0
-end
-if(bit.band(hardware, 4) ~= 4) then
-  print("RTC module not detected")
-  passed = 0
-end
-if(passed == 0) then
-  print("This Lua script requires an RTC module and a microSD card, but one or both are not detected. These features are only preinstalled on the T7-Pro. Script Stopping")
-  -- Writing 0 to LUA_RUN stops the script
-  MB.writeName("LUA_RUN", 0)
-end
 local table = {}
 table[1] = 0
 table[2] = 0
@@ -71,7 +71,8 @@ else
   MB.writeName("LUA_RUN", 0)
 end
 local streamread = 0
-local maxreads = 1000
+local maxreads = 10000
+local lastRead = 0
 local interval = 100
 -- Configure FIO0 and FIO1 as low
 MB.writeName("FIO0", 0)
@@ -83,17 +84,23 @@ local streamrunning = MB.readName("STREAM_ENABLE")
 if streamrunning == 1 then
   MB.writeName("STREAM_ENABLE", 0)
 end
+
 -- Use +-10V for the AIN range
-MB.writeName("AIN_ALL_RANGE", 10)
--- Use a 4000Hz scanrate
-MB.writeName("STREAM_SCANRATE_HZ", 4000)
+MB.writeName("AIN0_RANGE", .01)
+MB.writeName("AIN0_NEGATIVE_CH", 1)
+MB.writeName("AIN1_RANGE", 10)
+MB.writeName("AIN1_NEGATIVE_CH", 199)
+MB.writeName("AIN2_RANGE", 10)
+MB.writeName("AIN2_NEGATIVE_CH", 199)
+-- Use a 1000Hz scanrate
+MB.writeName("STREAM_SCANRATE_HZ", 10)
 print(string.format("Scanrate %.8f",MB.readName("STREAM_SCANRATE_HZ")))
 -- Use 1 channel for streaming
-MB.writeName("STREAM_NUM_ADDRESSES", 1)
+MB.writeName("STREAM_NUM_ADDRESSES", 2)
 -- Enforce a 1uS settling time
 MB.writeName("STREAM_SETTLING_US", 1)
 -- Use the default stream resolution
-MB.writeName("STREAM_RESOLUTION_INDEX", 0)
+MB.writeName("STREAM_RESOLUTION_INDEX", 8)
 -- Use a 1024 byte buffer size (must be a power of 2)
 MB.writeName("STREAM_BUFFER_SIZE_BYTES", 2^11)
 -- Use command-response mode (0b10000=16)
@@ -102,12 +109,13 @@ MB.writeName("STREAM_AUTO_TARGET", 16)
 MB.writeName("STREAM_NUM_SCANS", 0)
 -- Scan AIN0
 MB.writeName("STREAM_SCANLIST_ADDRESS0", 0)
+MB.writeName("STREAM_SCANLIST_ADDRESS1", 2)
 -- Start the stream
 MB.writeName("STREAM_ENABLE", 1)
 -- configure a 5ms interval
 LJ.IntervalConfig(0, 5)
 local running = true
-local numinbuffer = 1
+local numinbuffer = 2
 while running do
   -- If an interval is done
   if LJ.CheckInterval(0) then
@@ -117,24 +125,28 @@ while running do
     data = MB.readNameArray("STREAM_DATA_CR", numtoread, 0)
     -- Calculate the number of samples remaining in the buffer
     numinbuffer = data[2]
-    -- numinbuffer = bit.rshift(data[2],0) -- num/2 (num bytes in uint) /1 (num channels)
+    --numinbuffer = bit.rshift(data[2],0) -- num/2 (num bytes in uint) /1 (num channels)
     -- Make sure the number of samples read the next iteration is a manageable amount.
     if numinbuffer > 100 then
       numinbuffer = 100
     end
     -- Save read data to the open file.
+    print(numtoread)
     for i=5,numtoread do
       -- Notify user of a stream error.
+      print("\n")
       if data[i] == 0xFFFF then
         print("Bad Val", data[3],data[4])
       end
-      file:write(string.format("%.4f\n",applycal(data[i])))
+      print(data[i])
+      --file:write(string.format("%.4f\n",binaryToVoltageSmall(data[i])))
     end
     MB.writeName("FIO0", 0)
     MB.writeName("FIO1", 1)
-    streamread = streamread + 1
-    if streamread%interval == 0 then
-      print(streamread/maxreads, numinbuffer, data[2])
+    streamread = streamread + numinbuffer
+    if streamread - lastRead >= interval then
+      lastRead = streamread
+      print(string.format("Reads: %d, %d/%d read from buffer, Last Data: %f", streamread, numinbuffer, data[2], binaryToVoltageSmall(data[5])))
     end
     MB.writeName("FIO0", 0)
   end
@@ -147,6 +159,7 @@ end
 -- Configure FIO0 and FIO1 as low
 MB.writeName("FIO0", 0)
 MB.writeName("FIO1", 0)
+file:flush()
 file:close()
 print("Finishing Script", datawritten, filecount, filename)
 MB.writeName("LUA_RUN", 0)

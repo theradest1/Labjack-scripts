@@ -8,14 +8,13 @@
 -- logging switch on FIO2 (other side to ground)
 
 -- FILL OUT THESE VARIABLES ACCORDING TO THE STRAIN GAUGES BEING USED
-local exciteVolt = 5      -- External voltage used to excite the SGs (usually 10-12 volts)
 local elasticModulus = 29000000 -- elastic modulus for arms is 29m
 local gaugeFactor = 2.12 --2.12 -- based on the strain gauges
 -- set nominal resistances where below where pins are set
-LJ.IntervalConfig(0, .01) --logging interval in ms (.01 is the fastest it can go without just removing the interval timer)
+LJ.IntervalConfig(0, .01) --min logging interval in ms (probably won't actually go this fast)
 
 --syncing sin wave
-local sinWaveHz = 10
+local sinWaveHz = .1
 
 print("Strain Gauge - Log voltage to file")
 
@@ -61,6 +60,7 @@ local writeString = ""
 
 local startTime = 0
 local currentTime = 0
+local sinWave = 0
 
 -- AIN port config
 local ainChannelCorrection = {0, 0, 0, 0, 0}--, 0, 0, 0, 0} --values that zero each channel
@@ -165,7 +165,13 @@ while true do --loop forever
       givenVoltage = mbRead(givenVoltageChannel * 2, 3)
       
       --sin wave
-      writeString = math.sin(2 * 3.1415 * currentTime * sinWaveHz) .. ", " .. currentTime .. ", " .. givenVoltage
+      sinWave = math.sin(2 * 3.1415 * currentTime * sinWaveHz)
+      
+      --collect
+      writeString = sinWave .. ", " .. currentTime .. ", " .. givenVoltage
+      
+      --output sin wave to DAC0
+      mbWrite(1000, 3, 2.5 * sinWave + 2.5) -- 0V to 5V
       
       --go through channels
       for i=1,table.getn(ainChannels) do
@@ -178,7 +184,7 @@ while true do --loop forever
         nominalResistance = nominalResistances[i]
         
         -- math :(
-        sgResistance = -nominalResistance/(voltageDiff/givenVoltage - 0.5) - nominalResistance
+        sgResistance = nominalResistance/(1/(voltageDiff/givenVoltage + 0.5)-1)
         sgResistanceDiff = sgResistance - nominalResistance
         stress = sgResistanceDiff/sgResistance*elasticModulus/gaugeFactor
         
@@ -186,7 +192,7 @@ while true do --loop forever
       end
       
       file:write(writeString, "\n") -- Write data to file
-      --print(writeString) --print to console
+      print(writeString) --print to console
       
       --zeroing
       if mbRead(2000, 0) < .5 then
