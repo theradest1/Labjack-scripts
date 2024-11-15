@@ -179,7 +179,7 @@ while true do --loop forever
         sgResistanceDiff = sgResistance - nominalResistance
         stress = sgResistanceDiff/sgResistance*elasticModulus/gaugeFactor
         
-        writeString = writeString .. ", " .. stress
+        writeString = writeString .. ", " .. -stress
       end
       file:write(writeString, "\n") -- Write data to file
       --print(writeString) --print to console
