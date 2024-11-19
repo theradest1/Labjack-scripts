@@ -157,9 +157,11 @@ while true do --loop forever
       ledState = 1 - ledState -- turn on and off
       mbWriteName("FIO1", ledState) -- set led
       
-      
       --get time
       currentTime = mbReadArray(61500, 0, 2)[2] + mbRead(61502, 1)/10000 - startTime
+      if currentTime < 0 then
+        currentTime = currentTime + 65536 --keep it from going negative from start time offset
+      end
       
       --input voltage
       givenVoltage = mbRead(givenVoltageChannel * 2, 3)
@@ -190,9 +192,8 @@ while true do --loop forever
         
         writeString = writeString .. ", " .. stress
       end
-      
       file:write(writeString, "\n") -- Write data to file
-      print(writeString) --print to console
+      --print(writeString) --print to console
       
       --zeroing
       if mbRead(2000, 0) < .5 then
